@@ -103,7 +103,7 @@ class DenseNet(nn.Module):
         in_channels += nblocks[3]*growth_rate
         self.bn = nn.BatchNorm2d(in_channels)
         self.fc = nn.Linear(in_channels, num_classes)
-        self.in_planes = in_planes
+        self.in_channels = in_channels
         
     def forward(self, x):
         out = self.conv1(x)
@@ -112,8 +112,8 @@ class DenseNet(nn.Module):
         out = self.trans3(self.dense3(out))
         out = self.dense4(out)
         out = F.relu(self.bn(out))
-        out = F.avg_pool2d(out, 8)
-        out = out.view(-1, self.in_planes)
+        out = F.avg_pool2d(out, 4)
+        out = out.view(-1, self.in_channels)
         return self.fc(out)
 
 
