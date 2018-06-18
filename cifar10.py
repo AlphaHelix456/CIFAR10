@@ -1,129 +1,107 @@
 from __future__ import print_function
-
+import argparse
 import os
 import torch
-import torch.backends.cudnn as cudnn
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-from torch.autograd import Variable
-import torchvision
-import torchvision.transforms as transforms
+from torchvision import transforms, datasets
 from models import densenet
 
-use_cuda = torch.cuda.is_available()
-use_checkpoint = False
-best_accuracy = 0
-epochs = 150
-batch_size = 64
-
-classes = ['plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse',
-           'ship', 'truck']
-
-transform_train = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-
-transform_test = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-
-trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
-                                        download=True, transform=transform_train)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size,
-                                          shuffle=True)
-
-testset = torchvision.datasets.CIFAR10(root='./data', train=False,
-                                       download=True, transform=transform_test)
-testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size,
-                                         shuffle=False)
-
-net = densenet.DenseNet121()
-
-if use_checkpoint:
-    checkpoint = torch.load('./checkpoints/densenet121')
-    net.load_state_dict(checkpoint['state_dict'])
-    best_accuracy = checkpoint['accuracy']
-    start_epoch = checkpoint['epoch']
-
-
-if use_cuda:
-    net = nn.DataParallel(net)
-
-if use_cuda:
-    net.cuda()
-
-    
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(net.parameters(), lr=0.1, momentum=0.9)
-scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1)
-
-
-def train(epoch):
-    print('Epoch %d/%d' % (epoch, epochs))
-    global best_accuracy
-    running_loss = 0
-    total = 0
+def train(args, model, device, train_loader, criterion, optimizer, epoch):
+    print('Train Epoch {}'.format(epoch))
     correct = 0
-    for i, (inputs, labels) in enumerate(trainloader):
-        if use_cuda:
-            inputs, labels = inputs.cuda(), labels.cuda()
-            
-        inputs, labels = Variable(inputs), Variable(labels)
-
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device) 
         optimizer.zero_grad()
-        outputs = net(inputs)
-        loss = criterion(outputs, labels)
+        output = model(data)
+        loss = criterion(output, target)
         loss.backward()
         optimizer.step()
+        _, pred = torch.max(output.data, 1)
+        correct += pred.eq(target.view_as(pred)).sum().item()
+        total = (batch_idx+1) * len(data)
+        if batch_idx % args.log_interval == 0:
+            print('[{}/{}] ({:.0f}%)\tLoss: {:.4f} | Acc: {:.4f}%'.format(
+                    total, len(train_loader.dataset), 100. * total / len(train_loader.dataset),
+                    loss.item(), 100. * correct/total))
 
-        running_loss += loss.data[0]
-        _, predicted = torch.max(outputs.data, 1)
-        total += batch_size
-        correct += predicted.eq(labels.data).cpu().sum()
-        print ('Loss: %.3f | Acc: %.3f%% (%d/%d)'
-              % (running_loss/(i+1), 100*correct/total, correct, total))
-
-    scheduler.step()
-    accuracy = 100*correct/total
-    if accuracy > best_accuracy:
-        state = {'state_dict': net.state_dict(),
-                 'acc': accuracy,
-                 'epoch': epoch,
-                 }
-        if not os.path.isdir('checkpoints'):
-            os.mkdir('checkpoints')
+        state = {'state_dict': model.state_dict(), 'epoch': epoch}
         torch.save(state, './checkpoints/densenet121.t7')
-        best_accuracy = accuracy
 
-def test():
+def test(args, model, device, test_loader, criterion, epoch):
+    print('Test Epoch {}'.format(epoch))
     running_loss = 0
-    total = 0
     correct = 0
-    for i, (inputs, labels) in enumerate(testloader):
-        if use_cuda:
-            inputs, labels = inputs.cuda(), labels.cuda()
-            
-        inputs, labels = Variable(inputs), Variable(labels)
+    for batch_idx, (data, target) in enumerate(test_loader):
+        data, target = data.to(device), target.to(device)	
+        output = model(data)
+        loss = criterion(output, target)
+        running_loss += loss.item()
+        _, pred = torch.max(output.data, 1)
+        correct += pred.eq(target.view_as(pred)).sum().item()
 
-        outputs = net(inputs)
-        loss = criterion(outputs, labels)
-
-        running_loss += loss.data[0]
-        _, predicted = torch.max(outputs.data, 1)
-        total += batch_size
-        correct += predicted.eq(labels.data).cpu().sum()
-
-    print('Loss: %.3f | Acc: %.3f%% (%d/%d)'
-          % (running_loss/(i+1), 100*correct/total, correct, total))
+    print('Average Loss: {:.4f} | Acc: {:.4f}%'.format(
+            running_loss/(args.test_batch_size), 100. * correct/len(test_loader.dataset)))
 
 
-if __name__ == '__main__':
-    for epoch in range(epochs):
-        train(epoch)
-    test()
+def main():
+    # Training settings
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch-size', type=int, default=64,
+                        help='input batch size for training (default: 64)')
+    parser.add_argument('--test-batch-size', type=int, default=64, 
+                        help='input batch size for testing (default: 64)')
+    parser.add_argument('--epochs', type=int, default=100, 
+                        help='number of epochs to train (default: 100)')
+    parser.add_argument('--lr', type=float, default=0.01, 
+                        help='learning rate (default: 0.01)')
+    parser.add_argument('--momentum', type=float, default=0.9, 
+                        help='SGD momentum (default: 0.9)')
+    parser.add_argument('--log-interval', type=int, default=5, 
+                        help='how many batches to wait before logging training status (default: 5)')
+    parser.add_argument('--seed', type=int, default=42, 
+                        help='random seed (default: 42)')
+    parser.add_argument('--use-checkpoint', action='store_true', default=False, 
+                        help='enables loading model from checkpoint')
+    parser.add_argument('--no-cuda', action='store_true', default=False, 
+                        help='disables CUDA training')
+
+    args = parser.parse_args()
+    use_cuda = not args.no_cuda and torch.cuda.is_available()
+    torch.manual_seed(args.seed)
+    device = torch.device('cuda' if use_cuda else 'cpu')
+    kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
+    start_epoch = 0 
+    transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            ])
+    transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            ])
+    trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
+    train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+    testset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
+    test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, **kwargs) 	
+	
+    model = densenet.DenseNet121().to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
     
+    if not os.path.isdir('checkpoints'):
+        os.mkdir('checkpoints')
+
+    if args.use_checkpoint:	
+        checkpoint = torch.load('./checkpoints/densenet121')
+        model.load_state_dict(checkpoint['state_dict'])
+        start_epoch = checkpoint['epoch']
+	
+    for epoch in range(start_epoch, args.epochs):
+        train(args, model, device, train_loader, criterion, optimizer, epoch)
+        test(args, model, device, test_loader, criterion, epoch)
+	
+if __name__ == '__main__':
+    main() 
